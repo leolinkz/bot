@@ -1,0 +1,11 @@
+Run the scan now (as of this run).
+
+Instrument: Deriv Volatility 75 Index (symbol R_75) — a synthetic index that trades 24/7.
+
+1. Fetch real R_75 price data from Deriv's public WebSocket API (app_id 1089) using python + websocket-client, at two granularities: 5-minute (granularity 300, count 200) and 1-hour (granularity 3600, count 200), end "latest". Tag every level with its epoch/timestamp.
+2. Read the fx-trade-log memory store and reconcile any open ideas against current price (hit-target / stopped-out / still-open, with evidence). Update the track record.
+3. Scan R_75 for a high-probability setup using price structure, ranges, and volatility (no fundamentals — it's synthetic). Only emit a trade idea on genuinely high conviction; otherwise write "no high-probability setup" plus the levels you're watching.
+4. For any idea: direction, entry, stop, target, risk:reward (>= 1.5:1), one-line invalidation, conviction label, 1-2 lines of rationale. Keep the stop realistic for R_75's volatility.
+5. Write fx-brief.md to /mnt/session/outputs/ and append any new idea to fx-trade-log.
+
+If the data feed is unreachable or returns an error, say so in one line and emit no idea.

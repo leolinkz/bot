@@ -1,0 +1,115 @@
+{
+  "meta": {
+    "founder": "cyberlinkzts",
+    "company": "",
+    "problem": "An agent that continuously scans for high-probability trade opportunities and drafts a trade idea (entry/stop/target) I can act on — learning from how its past calls played out, and eventually placing live orders through my broker. First test instrument: Deriv Volatility 75 Index (R_75), which trades 24/7.",
+    "created": "2026-06-20",
+    "skill_version": "0.3.0"
+  },
+  "agent": {
+    "name": "fx-trade-scout",
+    "model": "claude-opus-4-8",
+    "model_rationale": "Newest Opus-class — the judgment call of 'is this genuinely high-probability?' deserves the strongest model. Each run costs cents; the scan can move to Sonnet later if cost matters more than edge.",
+    "version": null,
+    "system_summary": "Each run, fetches real R_75 (Deriv Volatility 75 Index) candles at 2 granularities from Deriv's public WebSocket API; reconciles open ideas in the memory store against what price did; scans for a high-probability setup on price structure/volatility; only on high conviction, drafts a trade idea (direction/entry/stop/target/R:R/invalidation/conviction) to /mnt/session/outputs/fx-brief.md and logs it. Draft-only — never places orders.",
+    "never_dos": [
+      "Never place, modify, or cancel any order, and never call any order/trade/execution tool — this version is analysis and drafting only",
+      "Never fabricate, round-from-memory, or estimate a price/level; every number must come from this run's fetched Deriv data with its timestamp, or it isn't used",
+      "Never emit a trade idea without a stop and a stated invalidation; never widen a stop to manufacture a better R:R",
+      "Never present a setup as certain — always state conviction and what would invalidate it",
+      "Decision-support for the operator's own trading, not financial advice for third parties — the operator reviews and places any trade"
+    ]
+  },
+  "outcome": {
+    "description": "Produce this run's trade-idea brief as fx-brief.md covering R_75 (Volatility 75 Index)",
+    "rubric_criteria": [
+      "fx-brief.md exists and has a section for R_75 — either a trade idea or an explicit 'no high-probability setup' with watch levels",
+      "Every price or level cited is fetched from Deriv this run and tagged with its timestamp; no un-sourced or invented numbers",
+      "Any emitted trade idea states all of: direction, entry, stop, target, and the resulting risk:reward (>= 1.5:1)",
+      "Any emitted trade idea states a one-line invalidation condition and a conviction label (medium/high)",
+      "Prior open ideas from the memory store are reconciled first — each marked hit-target / stopped-out / still-open with the price evidence — before any new idea is proposed",
+      "No order is placed and nothing is sent to an external system — the output is a draft brief only"
+    ],
+    "max_iterations": 3
+  },
+  "tools": {
+    "toolset": "agent_toolset_20260401",
+    "enabled": ["bash", "read", "write", "edit", "glob", "grep", "web_search", "web_fetch"],
+    "disabled": [],
+    "permission_overrides": [],
+    "custom_tools": [],
+    "notes": "Order-placement tools are deliberately NOT enabled in v0. Market data comes from Deriv's public WebSocket API (app_id 1089, no credential) fetched by the agent via bash+python (websocket-client)."
+  },
+  "connections": {
+    "mcp_servers": [],
+    "vault_credentials": [],
+    "github": null,
+    "notes": "v0 data: Deriv public WebSocket (ticks_history candles for R_75) — no credential needed. v1 live orders: the operator's Deriv API token (own app_id + token) in a vault, behind an always_ask gate. Order tools stay off until v1."
+  },
+  "skills": [],
+  "memory": {
+    "stores": [
+      {
+        "name": "fx-trade-log",
+        "access": "read_write",
+        "purpose": "Every idea (instrument, direction, entry/stop/target, timestamp, status) plus a running track record (count, hit rate, avg R). Read first each run so the agent grades its own past calls and adapts — the 'learn and improve' engine."
+      }
+    ]
+  },
+  "environment": {
+    "name": "fx-trade-scout-env",
+    "type": "cloud",
+    "networking": "unrestricted",
+    "allowed_hosts": [],
+    "packages": { "pip": ["websocket-client"] }
+  },
+  "schedule": {
+    "mode": "scheduled",
+    "cron": "0 * * * *",
+    "timezone": "UTC",
+    "human": "Hourly, 24/7 — R_75 is a synthetic index that never closes. ~24 runs/day. The agent no-ops (no idea) only if the data feed is unreachable.",
+    "kickoff": "user.define_outcome (task + rubric above), with relative dates only"
+  },
+  "evals": {
+    "cases": [
+      {"name": "case-01", "input": "evals/case-01/", "expected": "Today's first verified run output, saved at close as the regression baseline", "last_verdict": null}
+    ],
+    "notes": "Trade setups are fresh data — golden answers age out. The Outcome rubric IS the per-run eval; the self-graded track record in fx-trade-log is the real-world eval that accrues. Case 1 = today's first verified output, saved as the regression baseline before promoting any new agent version."
+  },
+  "defaults_applied": {
+    "iteration_bound": "Outcome stops after 3 grade-and-improve cycles per run",
+    "write_actions": "None in v0 — the agent drafts trade ideas; the operator places any trade. Live order placement is gated, in v1."
+  },
+  "interface": {
+    "who": "The operator (solo)",
+    "how": "Brief lands as fx-brief.md per run; reviewed in the terminal / Console. Run history + traces in the Console."
+  },
+  "next_directions": [
+    {
+      "what": "Live order placement through Deriv",
+      "why_deferred": "Real money — earn trust on the track record first (recommendation, not a hard limit)",
+      "how": "Operator's own Deriv app_id + API token in a vault; agent places via Deriv's 'buy'/'proposal' API behind an always_ask permission gate + a stake cap; or a Deriv demo account variant first"
+    },
+    {
+      "what": "Add gold (XAU/USD) and EUR/USD back as instruments",
+      "why_deferred": "Parked while we prove the engine on R_75; they share the same analysis logic",
+      "how": "Add their data source (broker MCP connector or web quotes) and extend the scan + rubric to cover all instruments"
+    },
+    {
+      "what": "Real-time reaction instead of hourly polling",
+      "why_deferred": "Polling is the pragmatic v0; true real-time needs an event source",
+      "how": "Subscribe to Deriv tick stream and trigger POST /sessions or /deployments/<id>/run on a signal, or tighten the cron to a 15-min interval"
+    },
+    {
+      "what": "Backtest / strategy eval harness + networking lockdown + trade-log dashboard",
+      "why_deferred": "Tooling / hardening — not needed to launch",
+      "how": "Replay historical R_75 bars to score a new version before promoting; environment networking: limited + allowed_hosts (Deriv host only); a generated results UI over fx-trade-log + outcomes"
+    },
+    {
+      "what": "Re-run evals before promoting any new agent version to the deployment",
+      "why_deferred": "Process habit, not a build task",
+      "how": "Run evals/run-evals.sh against the new version; only update the deployment when verdicts hold"
+    }
+  ],
+  "ids": {}
+}

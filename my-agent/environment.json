@@ -1,0 +1,6 @@
+{
+  "name": "fx-trade-scout-env",
+  "type": "cloud",
+  "networking": "unrestricted",
+  "packages": { "pip": ["websocket-client"] }
+}

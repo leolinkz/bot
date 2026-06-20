@@ -1,0 +1,9 @@
+# secrets and live IDs — never commit
+.env
+IDS.env
+
+# fetched run outputs
+outputs/
+
+# exported conversation transcripts (if any land here)
+*-transcript.txt
