@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fx-trade-scout</title>
+<style>
+  :root{
+    --bg:#faf9f5; --panel:#fff; --inset:#f0eee6; --ink:#141413; --body:#3d3d3a; --sub:#73726c; --mut:#9c9a92;
+    --line:rgba(20,20,19,.12); --soft:rgba(20,20,19,.07);
+    --green:#22865c; --green2:#1d7a52; --red:#c0392b; --clay:#ad5724; --amber:#9a7d24;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:var(--bg);color:var(--body);font-size:14px;line-height:1.5}
+  .wrap{max-width:1100px;margin:0 auto;padding:0 20px 40px}
+  .topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:14px;justify-content:space-between;
+          background:rgba(250,249,245,.93);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);
+          padding:12px 20px;margin:0 -20px 16px}
+  .ident{display:flex;align-items:center;gap:11px}
+  .sigil{width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:9px;
+         background:rgba(34,134,92,.10);border:1px solid rgba(34,134,92,.35);font-size:17px}
+  h1{margin:0;font-size:18px;font-weight:600;color:var(--ink);letter-spacing:-.01em}
+  .byline{font-family:var(--mono);font-size:11px;color:var(--mut)}
+  .dots{display:flex;gap:14px;align-items:center;font-family:var(--mono);font-size:11.5px;color:var(--sub)}
+  .dot{display:inline-flex;align-items:center;gap:6px}
+  .led{width:8px;height:8px;border-radius:50%;background:var(--mut);border:1px solid var(--line)}
+  .led.ok{background:var(--green)} .led.bad{background:var(--red)}
+  .grid{display:grid;grid-template-columns:1.5fr 1fr;gap:14px}
+  @media(max-width:880px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:14px}
+  .card h2{margin:0;font-size:14px;font-weight:600;color:var(--ink);padding:11px 14px;border-bottom:1px solid var(--soft);
+           display:flex;align-items:center;gap:8px;justify-content:space-between}
+  .card .body{padding:13px 14px}
+  button{font:inherit;border:1px solid var(--line);background:var(--inset);color:var(--ink);border-radius:9px;
+         padding:8px 14px;cursor:pointer}
+  button:hover{border-color:var(--mut)}
+  button.primary{background:var(--green);border-color:var(--green2);color:#fff;font-weight:600;padding:11px 18px;font-size:15px}
+  button.primary:disabled{opacity:.55;cursor:default}
+  button.ghost{background:transparent;font-size:12px;padding:5px 10px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .verdict{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:15px;font-weight:600;
+           padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--inset)}
+  .verdict.long{color:var(--green2);border-color:rgba(34,134,92,.4)}
+  .verdict.short{color:var(--red);border-color:rgba(192,57,43,.4)}
+  .verdict.none{color:var(--sub)}
+  .idea-tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+  .idea-tbl td{padding:6px 8px;border-bottom:1px solid var(--soft)}
+  .idea-tbl td:first-child{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);width:120px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .stat{background:var(--inset);border:1px solid var(--soft);border-radius:9px;padding:9px 11px}
+  .stat .k{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)}
+  .stat .v{font-family:var(--mono);font-size:18px;color:var(--ink);margin-top:2px}
+  table.list{width:100%;border-collapse:collapse;font-size:12.5px}
+  table.list th{text-align:left;font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.09em;
+                color:var(--mut);border-bottom:1px solid var(--line);padding:5px 7px}
+  table.list td{padding:5px 7px;border-bottom:1px solid var(--soft);font-family:var(--mono)}
+  .brief{font-size:13px}
+  .brief h1{font-size:14px;margin:.2em 0 .5em} .brief h2{font-size:13px;margin:.8em 0 .3em;color:var(--ink)}
+  .brief ul{margin:.3em 0 .3em 1.1em;padding:0} .brief li{margin:.2em 0}
+  .brieflist{display:flex;flex-direction:column;gap:4px;max-height:240px;overflow:auto}
+  .brieflist a{font-family:var(--mono);font-size:12px;color:var(--green2);text-decoration:none;cursor:pointer;padding:3px 4px;border-radius:5px}
+  .brieflist a:hover{background:var(--inset)}
+  label.f{display:block;margin:9px 0}
+  label.f span{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);display:block;margin-bottom:3px}
+  input{width:100%;font:inherit;font-size:13px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+  .hint{font-size:12px;color:var(--sub);margin-top:6px}
+  .err{background:rgba(192,57,43,.08);border:1px solid rgba(192,57,43,.35);color:#8a2a20;border-radius:9px;padding:10px 12px;font-size:13px}
+  .spin{width:15px;height:15px;border:2px solid var(--line);border-top-color:var(--green);border-radius:50%;display:inline-block;animation:s .8s linear infinite}
+  @keyframes s{to{transform:rotate(360deg)}}
+  .muted{color:var(--sub)} .mono{font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="ident">
+      <div class="sigil">🤖</div>
+      <div><h1>fx-trade-scout</h1><div class="byline" id="sub">local model · Deriv R_75</div></div>
+    </div>
+    <div class="dots">
+      <span class="dot"><span class="led" id="led-ollama"></span>model</span>
+      <span class="dot"><span class="led" id="led-deriv"></span>data</span>
+      <button class="ghost" onclick="test()">recheck</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Scan <span class="muted mono" id="sym-label"></span></h2>
+        <div class="body">
+          <div class="row">
+            <button class="primary" id="runbtn" onclick="runScan()">▶ Run scan</button>
+            <span id="runstatus" class="muted"></span>
+          </div>
+          <div id="result"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Latest brief</h2>
+        <div class="body"><div id="brief" class="brief muted">Run a scan to generate a brief.</div></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>Track record</h2>
+        <div class="body">
+          <div class="stats">
+            <div class="stat"><div class="k">Open</div><div class="v" id="t-open">0</div></div>
+            <div class="stat"><div class="k">Closed</div><div class="v" id="t-closed">0</div></div>
+            <div class="stat"><div class="k">Hit rate</div><div class="v" id="t-hit">—</div></div>
+            <div class="stat"><div class="k">Sum R</div><div class="v" id="t-sumr">0</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Open ideas</h2>
+        <div class="body"><div id="openideas" class="muted">none</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Recent briefs</h2>
+        <div class="body"><div id="brieflist" class="brieflist muted">none yet</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Settings <button class="ghost" onclick="saveCfg()">save</button></h2>
+        <div class="body">
+          <label class="f"><span>Model endpoint (LLM_BASE_URL)</span><input id="c-LLM_BASE_URL"></label>
+          <label class="f"><span>Model name (LLM_MODEL)</span><input id="c-LLM_MODEL"></label>
+          <label class="f"><span>Symbol</span><input id="c-SYMBOL"></label>
+          <label class="f"><span>Min risk:reward</span><input id="c-MIN_RR"></label>
+          <div class="hint">Saved to <span class="mono">config.env</span>. Model name must match what your runtime has loaded.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function call(method, payload){
+  if (window.pywebview && window.pywebview.api){ return await window.pywebview.api[method](payload || {}); }
+  const r = await fetch('/api/'+method, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload||{})});
+  return await r.json();
+}
+const $ = id => document.getElementById(id);
+
+function md(text){
+  // tiny markdown: headings, bold, bullet lists
+  const out=[]; let inList=false;
+  for(let line of (text||'').split('\n')){
+    line=line.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    line=line.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+    if(/^#\s/.test(line)){ if(inList){out.push('</ul>');inList=false;} out.push('<h1>'+line.slice(2)+'</h1>'); }
+    else if(/^##\s/.test(line)){ if(inList){out.push('</ul>');inList=false;} out.push('<h2>'+line.slice(3)+'</h2>'); }
+    else if(/^-\s/.test(line)){ if(!inList){out.push('<ul>');inList=true;} out.push('<li>'+line.slice(2)+'</li>'); }
+    else { if(inList){out.push('</ul>');inList=false;} if(line.trim())out.push('<p>'+line+'</p>'); }
+  }
+  if(inList)out.push('</ul>');
+  return out.join('');
+}
+
+async function refresh(){
+  const s = await call('get_state');
+  const c = s.config||{};
+  $('c-LLM_BASE_URL').value=c.LLM_BASE_URL||''; $('c-LLM_MODEL').value=c.LLM_MODEL||'';
+  $('c-SYMBOL').value=c.SYMBOL||''; $('c-MIN_RR').value=c.MIN_RR||'';
+  $('sub').textContent=`local model · ${c.LLM_MODEL||'?'} · ${c.SYMBOL||''}`;
+  $('sym-label').textContent=c.SYMBOL||'';
+  const t=s.track||{};
+  $('t-open').textContent=t.open??0; $('t-closed').textContent=t.closed??0;
+  $('t-sumr').textContent=t.sum_r??0;
+  $('t-hit').textContent=t.closed? Math.round((t.wins/t.closed)*100)+'%':'—';
+  // open ideas
+  const oi=s.open_ideas||[];
+  $('openideas').innerHTML = oi.length? '<table class="list"><tr><th>dir</th><th>entry</th><th>stop</th><th>target</th><th>R:R</th></tr>'+
+    oi.map(i=>`<tr><td>${i.direction}</td><td>${i.entry}</td><td>${i.stop}</td><td>${i.target}</td><td>${i.rr}</td></tr>`).join('')+'</table>'
+    : '<span class="muted">none</span>';
+  $('openideas').className = oi.length?'':'muted';
+  // brief list
+  const bl=s.briefs||[];
+  if(bl.length){
+    $('brieflist').className='brieflist';
+    $('brieflist').innerHTML = bl.map((b,i)=>`<a onclick='showBrief(${i})'>${b.name}</a>`).join('');
+    window._briefs=bl;
+    if($('brief').classList.contains('muted')) showBrief(0);
+  }
+}
+function showBrief(i){ const b=window._briefs[i]; $('brief').className='brief'; $('brief').innerHTML=md(b.md); }
+
+function renderIdea(r){
+  const v=r.setup? r.idea.direction:'none';
+  const cls=r.setup? r.idea.direction:'none';
+  let html=`<div class="row" style="margin-top:12px"><span class="verdict ${cls}">${r.verdict}</span></div>`;
+  if(r.setup){
+    const i=r.idea;
+    html+=`<table class="idea-tbl">
+      <tr><td>direction</td><td>${i.direction.toUpperCase()}</td></tr>
+      <tr><td>entry</td><td>${i.entry}</td></tr>
+      <tr><td>stop</td><td>${i.stop}</td></tr>
+      <tr><td>target</td><td>${i.target}</td></tr>
+      <tr><td>risk:reward</td><td>${i.rr}</td></tr>
+      <tr><td>conviction</td><td>${i.conviction||''}</td></tr>
+      <tr><td>invalidation</td><td>${i.invalidation||''}</td></tr>
+      <tr><td>rationale</td><td>${i.rationale||''}</td></tr>
+    </table><div class="hint">Draft only — you review and place any trade.</div>`;
+  } else {
+    html+=`<div class="hint" style="margin-top:10px">${(r.idea&&r.idea.rationale)||''}</div>`;
+  }
+  $('result').innerHTML=html;
+}
+
+async function runScan(){
+  $('runbtn').disabled=true;
+  $('runstatus').innerHTML='<span class="spin"></span> scanning… the local model can take a bit';
+  $('result').innerHTML='';
+  const r = await call('run_scan');
+  $('runbtn').disabled=false; $('runstatus').textContent='';
+  if(!r.ok){
+    const hints={data:'Check internet / that ws.derivws.com is reachable.',llm:'Is your model server running and the model name correct?',other:''};
+    $('result').innerHTML=`<div class="err" style="margin-top:12px"><strong>${r.stage} error:</strong> ${r.error}<br><span class="muted">${hints[r.stage]||''}</span></div>`;
+    return;
+  }
+  renderIdea(r);
+  if(r.brief_md){ $('brief').className='brief'; $('brief').innerHTML=md(r.brief_md); }
+  refresh();
+}
+
+async function test(){
+  $('led-ollama').className='led'; $('led-deriv').className='led';
+  const r = await call('test');
+  $('led-ollama').className='led '+(r.ollama?'ok':'bad');
+  $('led-deriv').className='led '+(r.deriv?'ok':'bad');
+}
+
+async function saveCfg(){
+  const cfg={LLM_BASE_URL:$('c-LLM_BASE_URL').value,LLM_MODEL:$('c-LLM_MODEL').value,
+             SYMBOL:$('c-SYMBOL').value,MIN_RR:$('c-MIN_RR').value};
+  await call('save_config', cfg); await refresh(); test();
+}
+
+function boot(){ refresh(); test(); }
+if(window.pywebview){ window.addEventListener('pywebviewready', boot); } else { window.addEventListener('load', boot); }
+</script>
+</body>
+</html>

@@ -35,7 +35,25 @@ cp config.env.example config.env      # then edit LLM_BASE_URL / LLM_MODEL
 
 A capable instruct model (≥7–8B, e.g. `llama3.1:8b`, `qwen2.5:14b`) gives much better judgment than a tiny one.
 
-## 3. Run
+## 3. Run — desktop app (recommended)
+
+```bash
+pip install -r requirements-desktop.txt
+python3 desktop_app.py          # opens a native window
+```
+
+A dashboard with a big **Run scan** button, the latest brief rendered, your track record,
+open ideas, recent briefs, and editable settings (model endpoint / name / symbol / min R:R).
+Two status lights show whether your **model server** and the **Deriv feed** are reachable.
+
+No native window on your OS (pywebview needs a system webview)? Use the browser fallback —
+identical UI, zero extra dependencies:
+
+```bash
+python3 desktop_app.py --web    # serves http://127.0.0.1:8765 and opens your browser
+```
+
+## 3b. Run — command line
 
 ```bash
 ./run.sh                       # one scan: fetch → analyze → write brief → log

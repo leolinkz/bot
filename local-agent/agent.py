@@ -2,43 +2,51 @@
 """
 fx-trade-scout (local) — one scan of Deriv R_75 using a LOCAL LLM.
 
-The Python harness does the deterministic work (fetch data, reconcile open ideas,
-compute levels, persist the log). The local model only makes the judgment call and
-returns a single JSON idea. This keeps the agent reliable even on small local models.
+The Python harness does the deterministic work (fetch data, reconcile open ideas, compute
+levels, persist the log). The local model only makes the judgment and returns one JSON idea.
 
-Run one scan:   python3 agent.py
-Hourly:         add `0 * * * *  cd /path/to/local-agent && ./run.sh` to crontab (see README).
+CLI:            python3 agent.py
+Importable:     from agent import scan ; result = scan()   (raises DataError / LLMError)
 
-Config comes from the environment (see config.env.example). Test toggles:
-  LLM_MOCK=1      bypass the model, synthesize an idea from the data (pipeline test, no LLM needed)
-  DERIV_SAMPLE=1  read sample_candles.json instead of the live Deriv feed (no network needed)
+Config from the environment (see config.env.example). Test toggles:
+  LLM_MOCK=1      bypass the model, synthesize an idea from the data
+  DERIV_SAMPLE=1  read sample_candles.json instead of the live Deriv feed
 """
 import os, sys, json, re, time, pathlib, datetime, urllib.request, urllib.error
 
 HERE = pathlib.Path(__file__).resolve().parent
 LOG = HERE / "trade_log.json"
 BRIEFS = HERE / "briefs"; BRIEFS.mkdir(exist_ok=True)
+SYSTEM = (HERE / "system_prompt.txt").read_text()
+
 
 def env(k, d=None): return os.environ.get(k, d)
+def symbol(): return env("SYMBOL", "R_75")
+def min_rr(): return float(env("MIN_RR", "1.5"))
 
-SYMBOL = env("SYMBOL", "R_75")
-MIN_RR = float(env("MIN_RR", "1.5"))
-SYSTEM = (HERE / "system_prompt.txt").read_text()
+
+class DataError(RuntimeError): pass
+class LLMError(RuntimeError): pass
 
 
 # ---------------------------------------------------------------- data
 def fetch_candles(granularity, count):
     if env("DERIV_SAMPLE") == "1":
-        data = json.loads((HERE / "sample_candles.json").read_text())
-        return data[str(granularity)]
-    from websocket import create_connection  # pip install websocket-client
-    app = env("DERIV_APP_ID", "1089")
-    ws = create_connection(f"wss://ws.derivws.com/websockets/v3?app_id={app}", timeout=20)
-    ws.send(json.dumps({"ticks_history": SYMBOL, "style": "candles",
-                        "granularity": granularity, "count": count, "end": "latest"}))
-    r = json.loads(ws.recv()); ws.close()
+        return json.loads((HERE / "sample_candles.json").read_text())[str(granularity)]
+    try:
+        from websocket import create_connection  # pip install websocket-client
+    except ImportError as e:
+        raise DataError("websocket-client not installed (pip install -r requirements.txt)") from e
+    try:
+        app = env("DERIV_APP_ID", "1089")
+        ws = create_connection(f"wss://ws.derivws.com/websockets/v3?app_id={app}", timeout=20)
+        ws.send(json.dumps({"ticks_history": symbol(), "style": "candles",
+                            "granularity": granularity, "count": count, "end": "latest"}))
+        r = json.loads(ws.recv()); ws.close()
+    except Exception as e:
+        raise DataError(f"could not reach Deriv: {e}") from e
     if "error" in r:
-        raise RuntimeError(f"Deriv error: {r['error'].get('message')}")
+        raise DataError(f"Deriv error: {r['error'].get('message')}")
     return r["candles"]
 
 
@@ -71,7 +79,6 @@ def save_log(log):
 
 def reconcile(log, candles_h1):
     """Deterministically check each open idea against price since it was logged."""
-    last = candles_h1[-1]["close"]
     for idea in log["ideas"]:
         if idea["status"] != "open":
             continue
@@ -87,8 +94,7 @@ def reconcile(log, candles_h1):
             elif lo <= idea["target"]: hit = "target"
         if hit:
             r = idea["rr"] if hit == "target" else -1.0
-            idea.update(status="closed", result=hit, realized_r=round(r, 2),
-                        closed_at=int(time.time()))
+            idea.update(status="closed", result=hit, realized_r=round(r, 2), closed_at=int(time.time()))
             log["track"]["closed"] += 1
             log["track"]["wins" if hit == "target" else "losses"] += 1
             log["track"]["sum_r"] = round(log["track"]["sum_r"] + r, 2)
@@ -100,27 +106,24 @@ def reconcile(log, candles_h1):
 def build_user_msg(s_h1, s_m5, log):
     open_ideas = [i for i in log["ideas"] if i["status"] == "open"]
     t = log["track"]
-    hit_rate = (t["wins"] / t["closed"] * 100) if t["closed"] else None
+    hit = (t["wins"] / t["closed"] * 100) if t["closed"] else None
     return json.dumps({
-        "instrument": SYMBOL,
-        "min_risk_reward": MIN_RR,
-        "timeframe_1h": s_h1,
-        "timeframe_5m": s_m5,
+        "instrument": symbol(), "min_risk_reward": min_rr(),
+        "timeframe_1h": s_h1, "timeframe_5m": s_m5,
         "open_ideas": open_ideas,
-        "track_record": {**t, "hit_rate_pct": round(hit_rate, 1) if hit_rate is not None else None},
+        "track_record": {**t, "hit_rate_pct": round(hit, 1) if hit is not None else None},
         "instruction": "Return ONE JSON idea per the system spec. 'no setup' is a valid, common answer.",
     }, indent=2)
 
 
 def mock_idea(s_h1):
-    """Deterministic stand-in so the pipeline can be tested without a model."""
-    entry = s_h1["last_close"]; rng = s_h1["avg_range14"] or 1.0
+    entry = s_h1["last_close"]; rng = s_h1["avg_range14"] or 1.0; m = min_rr()
     if s_h1["trend"] == "up":
-        stop, target = entry - rng, entry + MIN_RR * rng; direction = "long"
+        stop, target, direction = entry - rng, entry + m * rng, "long"
     else:
-        stop, target = entry + rng, entry - MIN_RR * rng; direction = "short"
+        stop, target, direction = entry + rng, entry - m * rng, "short"
     return {"setup": True, "direction": direction, "entry": round(entry, 4),
-            "stop": round(stop, 4), "target": round(target, 4), "rr": MIN_RR,
+            "stop": round(stop, 4), "target": round(target, 4), "rr": m,
             "conviction": "medium", "invalidation": "trend flips against the SMA20",
             "rationale": "[MOCK] trend-following stub generated from the data, no model used."}
 
@@ -129,34 +132,34 @@ def call_llm(user_msg):
     if env("LLM_MOCK") == "1":
         return json.dumps(mock_idea(json.loads(user_msg)["timeframe_1h"]))
     base = env("LLM_BASE_URL", "http://localhost:11434/v1").rstrip("/")
-    body = {
-        "model": env("LLM_MODEL", "llama3.1"),
-        "messages": [{"role": "system", "content": SYSTEM},
-                     {"role": "user", "content": user_msg}],
-        "temperature": float(env("LLM_TEMPERATURE", "0.2")),
-        "stream": False,
-        "response_format": {"type": "json_object"},
-    }
-    req = urllib.request.Request(base + "/chat/completions",
-                                 data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json",
-                                          "Authorization": f"Bearer {env('LLM_API_KEY', 'local')}"})
-    try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            d = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        # some local servers reject response_format — retry once without it
-        body.pop("response_format", None)
+    def post(body):
         req = urllib.request.Request(base + "/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json",
                                               "Authorization": f"Bearer {env('LLM_API_KEY', 'local')}"})
         with urllib.request.urlopen(req, timeout=180) as resp:
-            d = json.loads(resp.read())
-    return d["choices"][0]["message"]["content"]
+            return json.loads(resp.read())
+    body = {"model": env("LLM_MODEL", "llama3.1"),
+            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user_msg}],
+            "temperature": float(env("LLM_TEMPERATURE", "0.2")), "stream": False,
+            "response_format": {"type": "json_object"}}
+    try:
+        d = post(body)
+    except urllib.error.HTTPError:
+        body.pop("response_format", None)  # some local servers reject it — retry once
+        try:
+            d = post(body)
+        except Exception as e:
+            raise LLMError(f"LLM request failed: {e}") from e
+    except Exception as e:
+        raise LLMError(f"could not reach the model at {base}: {e}") from e
+    try:
+        return d["choices"][0]["message"]["content"]
+    except Exception as e:
+        raise LLMError(f"unexpected LLM response shape: {e}") from e
 
 
 def parse_idea(raw):
-    txt = raw.strip()
+    txt = (raw or "").strip()
     try:
         obj = json.loads(txt)
     except Exception:
@@ -169,16 +172,14 @@ def parse_idea(raw):
             return {"setup": False, "rationale": "model JSON was malformed", "_parse_error": True}
     if not obj.get("setup"):
         return {"setup": False, "rationale": obj.get("rationale", "no high-probability setup")}
-    # validate a claimed setup
     try:
         entry, stop, target = float(obj["entry"]), float(obj["stop"]), float(obj["target"])
         rr = abs(target - entry) / abs(entry - stop)
     except Exception:
         return {"setup": False, "rationale": "setup missing valid entry/stop/target — stood aside", "_invalid": True}
-    if obj.get("direction") not in ("long", "short") or rr + 1e-9 < MIN_RR:
-        return {"setup": False, "rationale": f"setup rejected (rr={rr:.2f} < {MIN_RR} or bad direction)", "_invalid": True}
-    obj["rr"] = round(rr, 2)
-    obj["entry"], obj["stop"], obj["target"] = entry, stop, target
+    if obj.get("direction") not in ("long", "short") or rr + 1e-9 < min_rr():
+        return {"setup": False, "rationale": f"setup rejected (rr={rr:.2f} < {min_rr()} or bad direction)", "_invalid": True}
+    obj.update(rr=round(rr, 2), entry=entry, stop=stop, target=target)
     return obj
 
 
@@ -186,7 +187,7 @@ def parse_idea(raw):
 def append_idea(log, idea, s_h1):
     log["ideas"].append({
         "logged_epoch": s_h1["last_epoch"], "logged_iso": datetime.datetime.utcnow().isoformat() + "Z",
-        "instrument": SYMBOL, "direction": idea["direction"], "entry": idea["entry"],
+        "instrument": symbol(), "direction": idea["direction"], "entry": idea["entry"],
         "stop": idea["stop"], "target": idea["target"], "rr": idea["rr"],
         "conviction": idea.get("conviction"), "invalidation": idea.get("invalidation"),
         "rationale": idea.get("rationale"), "status": "open",
@@ -195,16 +196,17 @@ def append_idea(log, idea, s_h1):
 
 
 def write_brief(s_h1, s_m5, log, idea):
+    sym = symbol()
     ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     t = log["track"]
     hit = f"{t['wins']}/{t['closed']} ({t['wins']/t['closed']*100:.0f}%)" if t["closed"] else "no closed trades yet"
-    lines = [f"# {SYMBOL} brief — {ts}", "",
+    lines = [f"# {sym} brief — {ts}", "",
              f"- last close **{s_h1['last_close']}** (epoch {s_h1['last_epoch']})  ·  trend **{s_h1['trend']}**",
-             f"- 1h range/structure: high {s_h1['recent_high']} · low {s_h1['recent_low']} · SMA20 {s_h1['sma20']} · avg14 range {s_h1['avg_range14']}",
+             f"- 1h structure: high {s_h1['recent_high']} · low {s_h1['recent_low']} · SMA20 {s_h1['sma20']} · avg14 range {s_h1['avg_range14']}",
              f"- track record: {hit} · sumR {t['sum_r']} · open {t['open']}", ""]
     if idea.get("setup"):
         lines += ["## Trade idea", "",
-                  f"- **{idea['direction'].upper()}** {SYMBOL}",
+                  f"- **{idea['direction'].upper()}** {sym}",
                   f"- entry **{idea['entry']}** · stop **{idea['stop']}** · target **{idea['target']}** · R:R **{idea['rr']}**",
                   f"- conviction **{idea.get('conviction')}**",
                   f"- invalidation: {idea.get('invalidation')}",
@@ -212,45 +214,51 @@ def write_brief(s_h1, s_m5, log, idea):
                   "_Draft only — operator reviews and places any trade._"]
     else:
         lines += ["## No high-probability setup", "", f"- {idea.get('rationale')}"]
-    # note any reconciled closes this run
     closed_now = [i for i in log["ideas"] if i["status"] == "closed" and i.get("closed_at", 0) > time.time() - 3600]
     if closed_now:
         lines += ["", "## Reconciled this run"]
         for i in closed_now:
             lines.append(f"- {i['direction']} @ {i['entry']} → **{i['result']}** (R {i['realized_r']})")
-    path = BRIEFS / f"{SYMBOL}-{ts}.md"
+    path = BRIEFS / f"{sym}-{ts}.md"
     path.write_text("\n".join(lines) + "\n")
-    return path
+    return path, "\n".join(lines) + "\n", closed_now
 
 
-# ---------------------------------------------------------------- main
-def main():
-    print(f"[fx-trade-scout/local] scanning {SYMBOL} …")
-    try:
-        c_h1 = fetch_candles(3600, 200)
-        c_m5 = fetch_candles(300, 200)
-    except Exception as e:
-        print(f"  data feed unavailable: {e}")
-        print("  (set DERIV_SAMPLE=1 to test offline, or allow ws.derivws.com egress)")
-        sys.exit(2)
+# ---------------------------------------------------------------- scan (importable) + CLI
+def scan():
+    """Run one scan. Returns a result dict. Raises DataError / LLMError on failure."""
+    c_h1 = fetch_candles(3600, 200)
+    c_m5 = fetch_candles(300, 200)
     s_h1, s_m5 = summarize(c_h1), summarize(c_m5)
     log = reconcile(load_log(), c_h1)
-    user_msg = build_user_msg(s_h1, s_m5, log)
-    try:
-        raw = call_llm(user_msg)
-    except Exception as e:
-        print(f"  LLM call failed: {e}")
-        print(f"  check LLM_BASE_URL ({env('LLM_BASE_URL', 'http://localhost:11434/v1')}) and that the model is loaded")
-        sys.exit(3)
+    raw = call_llm(build_user_msg(s_h1, s_m5, log))
     idea = parse_idea(raw)
     if idea.get("setup"):
         append_idea(log, idea, s_h1)
-    path = write_brief(s_h1, s_m5, log, idea)
+    path, brief_md, closed_now = write_brief(s_h1, s_m5, log, idea)
     save_log(log)
     verdict = f"{idea['direction'].upper()} (R:R {idea['rr']})" if idea.get("setup") else "no setup"
-    print(f"  verdict: {verdict}")
-    print(f"  brief:   {path}")
-    print(f"  log:     {LOG}  (open {log['track']['open']} · closed {log['track']['closed']})")
+    return {"symbol": symbol(), "verdict": verdict, "setup": bool(idea.get("setup")), "idea": idea,
+            "summary_h1": s_h1, "summary_m5": s_m5, "track": log["track"],
+            "open_ideas": [i for i in log["ideas"] if i["status"] == "open"],
+            "closed_now": closed_now, "brief_path": str(path), "brief_md": brief_md}
+
+
+def main():
+    print(f"[fx-trade-scout/local] scanning {symbol()} …")
+    try:
+        res = scan()
+    except DataError as e:
+        print(f"  data feed unavailable: {e}")
+        print("  (set DERIV_SAMPLE=1 to test offline, or allow ws.derivws.com egress)")
+        sys.exit(2)
+    except LLMError as e:
+        print(f"  LLM call failed: {e}")
+        print(f"  check LLM_BASE_URL ({env('LLM_BASE_URL', 'http://localhost:11434/v1')}) and that the model is loaded")
+        sys.exit(3)
+    print(f"  verdict: {res['verdict']}")
+    print(f"  brief:   {res['brief_path']}")
+    print(f"  log:     {LOG}  (open {res['track']['open']} · closed {res['track']['closed']})")
 
 
 if __name__ == "__main__":
