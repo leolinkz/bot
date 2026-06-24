@@ -1,0 +1,7 @@
+# local runtime state — never commit
+config.env
+trade_log.json
+briefs/
+.venv/
+__pycache__/
+*.pyc
