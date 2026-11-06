@@ -7,12 +7,13 @@
 //|  - Lot size calculated from risk (% balance, % equity or money)  |
 //|  - Draggable Entry / SL / TP lines with live risk & reward       |
 //|  - Hard cap on risk per trade, SL always required                |
+//|  - News alerts for red / orange folder events (Forex Factory)   |
 //|  - Daily guard: max losses, max daily loss %, max wins           |
 //|      * Loss lock: NO override until the next trading day         |
 //|      * Win lock : can be overridden from the panel               |
 //+------------------------------------------------------------------+
 #property copyright "leolinkz"
-#property version   "1.00"
+#property version   "1.10"
 #property description "Manual trade panel: risk-based lot sizing for market and pending orders,"
 #property description "with a daily loss/win guard (loss lock cannot be overridden)."
 
@@ -32,6 +33,14 @@ enum ENUM_RM_EXPIRY
   {
    RM_EXP_GTC = 0, // Good till cancelled
    RM_EXP_DAY = 1  // Expire at end of trading day
+  };
+
+enum ENUM_RM_NEWS_SOURCE
+  {
+   NEWS_FF_THEN_MT5 = 0, // Forex Factory (MT5 calendar as backup)
+   NEWS_FF_ONLY     = 1, // Forex Factory only
+   NEWS_MT5_ONLY    = 2, // MT5 built-in calendar only
+   NEWS_OFF         = 3  // Off
   };
 
 #define KIND_MARKET 0
@@ -65,6 +74,23 @@ input bool              InpBlockIfUnprotected  = true; // Block new trades while
 input bool              InpEnforceLock         = true; // While locked: close/delete trades opened anywhere
 input bool              InpDeletePendingsOnLock= true; // When a lock triggers: delete ALL pending orders
 input bool              InpPushNotifications   = false;// Send push notification when a lock triggers
+
+input group "=== News alerts (Forex Factory) ==="
+input ENUM_RM_NEWS_SOURCE InpNewsSource     = NEWS_FF_THEN_MT5; // News source
+input string            InpNewsUrl          = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"; // Forex Factory weekly feed (JSON)
+input bool              InpNewsHigh         = true;   // Watch RED folder (high impact)
+input bool              InpNewsMedium       = true;   // Watch ORANGE folder (medium impact)
+input string            InpNewsCurrencies   = "";     // Currencies, e.g. "USD,EUR" ("" = this symbol's, "ALL" = all)
+input string            InpNewsAlertMinutes = "30,5"; // Alert this many minutes before (comma list, 0 = at release)
+input bool              InpNewsAlertPopup   = true;   // Pop-up + sound alert
+input bool              InpNewsPush         = false;  // Push notification to phone
+input bool              InpNewsBlockHigh    = false;  // Block NEW trades around red news
+input bool              InpNewsBlockMedium  = false;  // Block NEW trades around orange news
+input int               InpNewsBlockBefore  = 15;     // Block window: minutes before
+input int               InpNewsBlockAfter   = 15;     // Block window: minutes after
+input int               InpNewsRefreshMin   = 60;     // Refresh the feed every N minutes (min 15)
+input bool              InpNewsLines        = true;   // Draw vertical lines at news times
+input int               InpNewsPanelRows    = 3;      // Upcoming events shown on panel (1-8)
 
 input group "=== Execution ==="
 input ulong             InpMagic           = 20261106;  // Magic number
@@ -415,6 +441,679 @@ void Recalc()
      }
   }
 
+void DeleteAllPendings();
+void SetText(const string n, const string t);
+void SetColor(const string n, const color c);
+void EnsureStopsOnFill(const double sl, const double tp);
+
+//+------------------------------------------------------------------+
+//| News: Forex Factory weekly calendar (MT5 calendar as backup)     |
+//+------------------------------------------------------------------+
+#define NEWS_DIR    "RiskManager"
+#define NEWS_CACHE  "RiskManager\\ff_calendar_thisweek.json"
+#define CLR_NRED    C'235,60,60'
+#define CLR_NORANGE C'255,150,40'
+
+struct NewsEvent
+  {
+   datetime          time;      // trade-server time
+   string            cur;
+   string            title;
+   int               impact;    // 2 = red (high), 1 = orange (medium)
+   string            forecast;
+   string            previous;
+   uint              alerted;   // bit per alert stage already fired
+  };
+
+NewsEvent g_news[];
+int       g_newsCount    = 0;
+string    g_newsSrc      = "";
+string    g_newsErr      = "";
+datetime  g_newsLoadedAt = 0;   // local time
+datetime  g_newsNextLoad = 0;   // local time
+int       g_alertStages[];
+bool      g_newsWebWarned = false;
+
+bool NewsEnabled()
+  {
+   return InpNewsSource != NEWS_OFF && !MQLInfoInteger(MQL_TESTER);
+  }
+
+bool ImpactWanted(const int imp)
+  {
+   return (imp == 2 && InpNewsHigh) || (imp == 1 && InpNewsMedium);
+  }
+
+bool CurrencyWanted(string cur)
+  {
+   StringToUpper(cur);
+   if(cur == "ALL")
+      return true;                      // global events (G7/G20 etc.)
+   string list = InpNewsCurrencies;
+   StringToUpper(list);
+   StringReplace(list, " ", "");
+   if(list == "ALL")
+      return true;
+   if(list == "")
+     {
+      string b = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
+      string p = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
+      string m = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_MARGIN);
+      return cur == b || cur == p || cur == m;
+     }
+   return StringFind("," + list + ",", "," + cur + ",") >= 0;
+  }
+
+string WatchedCurrencies()
+  {
+   string list = InpNewsCurrencies;
+   StringToUpper(list);
+   StringReplace(list, " ", "");
+   if(list != "")
+      return list;
+   string b = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
+   string p = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
+   return (b == p) ? b : b + "," + p;
+  }
+
+int ServerUtcOffset()
+  {
+   long d = (long)TimeTradeServer() - (long)TimeGMT();
+   return (int)(MathRound(d / 900.0) * 900);
+  }
+
+//--- minimal JSON helpers (the feed is an array of flat objects)
+int JsonObjectEnd(const string &s, const int start)
+  {
+   bool inStr = false, esc = false;
+   int n = StringLen(s);
+   for(int i = start + 1; i < n; i++)
+     {
+      ushort c = StringGetCharacter(s, i);
+      if(inStr)
+        {
+         if(esc)
+            esc = false;
+         else
+            if(c == '\\')
+               esc = true;
+            else
+               if(c == '"')
+                  inStr = false;
+         continue;
+        }
+      if(c == '"')
+         inStr = true;
+      else
+         if(c == '}')
+            return i;
+     }
+   return -1;
+  }
+
+int HexVal(const string h)
+  {
+   int v = 0;
+   for(int i = 0; i < StringLen(h); i++)
+     {
+      ushort c = StringGetCharacter(h, i);
+      v <<= 4;
+      if(c >= '0' && c <= '9')
+         v += c - '0';
+      else
+         if(c >= 'a' && c <= 'f')
+            v += c - 'a' + 10;
+         else
+            if(c >= 'A' && c <= 'F')
+               v += c - 'A' + 10;
+     }
+   return v;
+  }
+
+string JsonStr(const string &obj, const string key)
+  {
+   int k = StringFind(obj, "\"" + key + "\"");
+   if(k < 0)
+      return "";
+   int n = StringLen(obj);
+   int i = k + StringLen(key) + 2;
+   while(i < n && StringGetCharacter(obj, i) != ':')
+      i++;
+   i++;
+   while(i < n)
+     {
+      ushort c = StringGetCharacter(obj, i);
+      if(c != ' ' && c != '\t' && c != '\r' && c != '\n')
+         break;
+      i++;
+     }
+   if(i >= n)
+      return "";
+   if(StringGetCharacter(obj, i) != '"')
+     {
+      int j = i;
+      while(j < n)
+        {
+         ushort c = StringGetCharacter(obj, j);
+         if(c == ',' || c == '}')
+            break;
+         j++;
+        }
+      string v = StringSubstr(obj, i, j - i);
+      StringTrimLeft(v);
+      StringTrimRight(v);
+      return (v == "null") ? "" : v;
+     }
+   string out = "";
+   i++;
+   while(i < n)
+     {
+      ushort c = StringGetCharacter(obj, i);
+      if(c == '"')
+         break;
+      if(c == '\\' && i + 1 < n)
+        {
+         ushort e = StringGetCharacter(obj, i + 1);
+         if(e == 'u' && i + 5 < n)
+           {
+            out += ShortToString((ushort)HexVal(StringSubstr(obj, i + 2, 4)));
+            i += 6;
+            continue;
+           }
+         if(e == 'n' || e == 't' || e == 'r')
+            out += " ";
+         else
+            out += ShortToString(e);
+         i += 2;
+         continue;
+        }
+      out += ShortToString(c);
+      i++;
+     }
+   return out;
+  }
+
+// "2026-11-06T08:30:00-05:00" / "...Z" / "...08:30:00.000+01:00" -> UTC
+bool ParseIsoUtc(const string s, datetime &utc)
+  {
+   if(StringLen(s) < 19)
+      return false;
+   MqlDateTime t;
+   t.year = (int)StringToInteger(StringSubstr(s, 0, 4));
+   t.mon  = (int)StringToInteger(StringSubstr(s, 5, 2));
+   t.day  = (int)StringToInteger(StringSubstr(s, 8, 2));
+   t.hour = (int)StringToInteger(StringSubstr(s, 11, 2));
+   t.min  = (int)StringToInteger(StringSubstr(s, 14, 2));
+   t.sec  = (int)StringToInteger(StringSubstr(s, 17, 2));
+   t.day_of_week = 0;
+   t.day_of_year = 0;
+   if(t.year < 2000 || t.mon < 1 || t.mon > 12 || t.day < 1 || t.day > 31)
+      return false;
+   datetime local = StructToTime(t);
+   int off = 0;
+   int n = StringLen(s);
+   int i = 19;
+   while(i < n)
+     {
+      ushort c = StringGetCharacter(s, i);
+      if(c == '.' || (c >= '0' && c <= '9'))
+        {
+         i++;
+         continue;
+        }
+      break;
+     }
+   if(i < n)
+     {
+      ushort sg = StringGetCharacter(s, i);
+      if((sg == '+' || sg == '-') && i + 3 <= n)
+        {
+         int oh = (int)StringToInteger(StringSubstr(s, i + 1, 2));
+         int om = (i + 6 <= n) ? (int)StringToInteger(StringSubstr(s, i + 4, 2)) : 0;
+         off = (oh * 3600 + om * 60) * (sg == '-' ? -1 : 1);
+        }
+     }
+   utc = local - off;
+   return true;
+  }
+
+void AddEvent(NewsEvent &arr[], int &cnt, const datetime t, const string cur, const string title,
+              const int imp, const string fc, const string pv)
+  {
+   ArrayResize(arr, cnt + 1, 64);
+   arr[cnt].time     = t;
+   arr[cnt].cur      = cur;
+   arr[cnt].title    = title;
+   arr[cnt].impact   = imp;
+   arr[cnt].forecast = fc;
+   arr[cnt].previous = pv;
+   arr[cnt].alerted  = 0;
+   cnt++;
+  }
+
+bool ParseFF(const string &js, NewsEvent &arr[], int &cnt)
+  {
+   int parsed = 0;
+   int pos = 0;
+   int off = ServerUtcOffset();
+   while(true)
+     {
+      int ob = StringFind(js, "{", pos);
+      if(ob < 0)
+         break;
+      int cb = JsonObjectEnd(js, ob);
+      if(cb < 0)
+         break;
+      string obj = StringSubstr(js, ob, cb - ob + 1);
+      pos = cb + 1;
+
+      string imp = JsonStr(obj, "impact");
+      if(imp == "")
+         continue;
+      parsed++;
+      StringToLower(imp);
+      int level = (imp == "high") ? 2 : ((imp == "medium") ? 1 : 0);
+      if(level == 0 || !ImpactWanted(level))
+         continue;
+      string cur = JsonStr(obj, "country");
+      if(!CurrencyWanted(cur))
+         continue;
+      datetime utc = 0;
+      if(!ParseIsoUtc(JsonStr(obj, "date"), utc))
+         continue;
+      StringToUpper(cur);
+      AddEvent(arr, cnt, utc + off, cur, JsonStr(obj, "title"), level,
+               JsonStr(obj, "forecast"), JsonStr(obj, "previous"));
+     }
+   if(parsed == 0 && g_newsErr == "")
+      g_newsErr = "Forex Factory data not recognised";
+   return parsed > 0;
+  }
+
+bool FetchFF(string &json)
+  {
+   char   post[], res[];
+   string rh;
+   string hdr = "User-Agent: Mozilla/5.0 (MetaTrader 5; RiskManagerEA)\r\nAccept: application/json\r\n";
+   ResetLastError();
+   int code = WebRequest("GET", InpNewsUrl, hdr, 8000, post, res, rh);
+   if(code == -1)
+     {
+      int e = GetLastError();
+      if(e == 4014)
+        {
+         g_newsErr = "WebRequest not allowed for FF URL";
+         if(!g_newsWebWarned)
+           {
+            g_newsWebWarned = true;
+            Alert("[RiskMgr] To get Forex Factory news: Tools > Options > Expert Advisors > tick 'Allow WebRequest "
+                  "for listed URL' and add  https://nfs.faireconomy.media");
+           }
+        }
+      else
+         g_newsErr = "FF download failed (error " + IntegerToString(e) + ")";
+      return false;
+     }
+   if(code != 200)
+     {
+      g_newsErr = "FF returned HTTP " + IntegerToString(code);
+      return false;
+     }
+   json = CharArrayToString(res, 0, WHOLE_ARRAY, CP_UTF8);
+   if(StringFind(json, "\"impact\"") < 0)
+     {
+      g_newsErr = "FF sent no calendar (rate-limited?)";
+      return false;
+     }
+   return true;
+  }
+
+bool ReadCache(string &json, datetime &modified)
+  {
+   if(!FileIsExist(NEWS_CACHE, FILE_COMMON))
+      return false;
+   modified = (datetime)FileGetInteger(NEWS_CACHE, FILE_MODIFY_DATE, true);
+   int h = FileOpen(NEWS_CACHE, FILE_READ | FILE_BIN | FILE_COMMON);
+   if(h == INVALID_HANDLE)
+      return false;
+   int sz = (int)FileSize(h);
+   uchar buf[];
+   ArrayResize(buf, sz);
+   if(sz > 0)
+      FileReadArray(h, buf, 0, sz);
+   FileClose(h);
+   if(sz <= 0)
+      return false;
+   json = CharArrayToString(buf, 0, sz, CP_UTF8);
+   return StringLen(json) > 0;
+  }
+
+void WriteCache(const string &json)
+  {
+   FolderCreate(NEWS_DIR, FILE_COMMON);
+   uchar buf[];
+   int n = StringToCharArray(json, buf, 0, WHOLE_ARRAY, CP_UTF8);
+   int h = FileOpen(NEWS_CACHE, FILE_WRITE | FILE_BIN | FILE_COMMON);
+   if(h == INVALID_HANDLE)
+      return;
+   if(n > 1)
+      FileWriteArray(h, buf, 0, n - 1);   // drop terminating 0
+   FileClose(h);
+  }
+
+bool LoadMT5Calendar(NewsEvent &arr[], int &cnt)
+  {
+   MqlCalendarValue vals[];
+   datetime now = TimeTradeServer();
+   ResetLastError();
+   int n = CalendarValueHistory(vals, now - 2 * 86400, now + 8 * 86400, NULL, NULL);
+   if(n <= 0)
+     {
+      if(g_newsErr == "")
+         g_newsErr = "MT5 calendar unavailable";
+      return false;
+     }
+   for(int i = 0; i < n; i++)
+     {
+      MqlCalendarEvent ev;
+      if(!CalendarEventById(vals[i].event_id, ev))
+         continue;
+      int imp = (ev.importance == CALENDAR_IMPORTANCE_HIGH) ? 2 :
+                ((ev.importance == CALENDAR_IMPORTANCE_MODERATE) ? 1 : 0);
+      if(imp == 0 || !ImpactWanted(imp))
+         continue;
+      MqlCalendarCountry c;
+      if(!CalendarCountryById(ev.country_id, c))
+         continue;
+      if(!CurrencyWanted(c.currency))
+         continue;
+      AddEvent(arr, cnt, vals[i].time, c.currency, ev.name, imp, "", "");   // calendar times are server time
+     }
+   return true;
+  }
+
+void DrawNewsLines()
+  {
+   ObjectsDeleteAll(0, "RM_nv_");
+   if(!InpNewsLines)
+      return;
+   for(int i = 0; i < g_newsCount; i++)
+     {
+      string n = "RM_nv_" + IntegerToString(i);
+      if(!ObjectCreate(0, n, OBJ_VLINE, 0, g_news[i].time, 0))
+         continue;
+      ObjectSetInteger(0, n, OBJPROP_COLOR, g_news[i].impact == 2 ? CLR_NRED : CLR_NORANGE);
+      ObjectSetInteger(0, n, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, n, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, n, OBJPROP_BACK, true);
+      ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, n, OBJPROP_HIDDEN, true);
+      string tip = g_news[i].cur + " " + g_news[i].title + (g_news[i].impact == 2 ? " [RED]" : " [ORANGE]");
+      if(g_news[i].forecast != "" || g_news[i].previous != "")
+         tip += "  f: " + g_news[i].forecast + "  p: " + g_news[i].previous;
+      ObjectSetString(0, n, OBJPROP_TEXT, tip);
+      ObjectSetString(0, n, OBJPROP_TOOLTIP, tip);
+     }
+  }
+
+void LoadNews()
+  {
+   int refresh = MathMax(15, InpNewsRefreshMin);
+   g_newsNextLoad = TimeLocal() + refresh * 60;
+   if(!NewsEnabled())
+      return;
+
+   NewsEvent fresh[];
+   int  cnt = 0;
+   bool ok = false;
+   string src = "";
+   g_newsErr = "";
+
+   if(InpNewsSource != NEWS_MT5_ONLY)
+     {
+      string   cached = "";
+      datetime mod = 0;
+      bool haveCache = ReadCache(cached, mod);
+      // the cache is shared by every chart/terminal, so Forex Factory is hit at most once per refresh period
+      if(haveCache && TimeLocal() - mod < refresh * 60)
+         ok = ParseFF(cached, fresh, cnt);
+      if(!ok)
+        {
+         cnt = 0;
+         ArrayResize(fresh, 0);
+         string web = "";
+         if(FetchFF(web))
+           {
+            WriteCache(web);
+            ok = ParseFF(web, fresh, cnt);
+           }
+         else
+            if(haveCache)
+              {
+               string why = g_newsErr;
+               ok = ParseFF(cached, fresh, cnt);
+               if(ok)
+                  g_newsErr = "stale cache: " + why;
+              }
+        }
+      if(ok)
+         src = "FF";
+     }
+   if(!ok && InpNewsSource != NEWS_FF_ONLY)
+     {
+      cnt = 0;
+      ArrayResize(fresh, 0);
+      string why = g_newsErr;
+      g_newsErr = "";
+      ok = LoadMT5Calendar(fresh, cnt);
+      if(ok)
+        {
+         src = "MT5 cal";
+         if(why != "")
+            g_newsErr = "FF failed, using MT5: " + why;
+        }
+     }
+   if(!ok)
+     {
+      g_newsNextLoad = TimeLocal() + 300;   // retry in 5 min
+      if(g_newsErr == "")
+         g_newsErr = "No news data";
+      Print("[RiskMgr] News: ", g_newsErr);
+      return;
+     }
+
+   // keep "already alerted" flags across reloads
+   for(int j = 0; j < cnt; j++)
+      for(int i = 0; i < g_newsCount; i++)
+         if(g_news[i].time == fresh[j].time && g_news[i].cur == fresh[j].cur && g_news[i].title == fresh[j].title)
+           {
+            fresh[j].alerted = g_news[i].alerted;
+            break;
+           }
+
+   // sort by time (insertion sort, small list)
+   for(int a = 1; a < cnt; a++)
+     {
+      NewsEvent tmp = fresh[a];
+      int b = a - 1;
+      while(b >= 0 && fresh[b].time > tmp.time)
+        {
+         fresh[b + 1] = fresh[b];
+         b--;
+        }
+      fresh[b + 1] = tmp;
+     }
+
+   ArrayResize(g_news, cnt);
+   for(int k = 0; k < cnt; k++)
+      g_news[k] = fresh[k];
+   g_newsCount    = cnt;
+   g_newsSrc      = src;
+   g_newsLoadedAt = TimeLocal();
+   Print("[RiskMgr] News loaded from ", src, ": ", cnt, " red/orange events for ", WatchedCurrencies());
+   DrawNewsLines();
+  }
+
+void InitAlertStages()
+  {
+   ArrayResize(g_alertStages, 0);
+   string parts[];
+   int n = StringSplit(InpNewsAlertMinutes, ',', parts);
+   for(int i = 0; i < n && ArraySize(g_alertStages) < 31; i++)
+     {
+      string p = parts[i];
+      StringTrimLeft(p);
+      StringTrimRight(p);
+      if(p == "")
+         continue;
+      int v = (int)StringToInteger(p);
+      if(v < 0)
+         continue;
+      int sz = ArraySize(g_alertStages);
+      ArrayResize(g_alertStages, sz + 1);
+      g_alertStages[sz] = v;
+     }
+  }
+
+string Countdown(const long secs)
+  {
+   if(secs <= 0 && secs > -300)
+      return "NOW";
+   if(secs < 0)
+      return IntegerToString((int)(-secs / 60)) + "m ago";
+   int m = (int)(secs / 60);
+   if(m < 60)
+      return "in " + IntegerToString(m) + "m";
+   int h = m / 60;
+   if(h < 24)
+      return StringFormat("in %dh %02dm", h, m % 60);
+   return StringFormat("in %dd %dh", h / 24, h % 24);
+  }
+
+string NewsWhen(const datetime t)
+  {
+   static string days[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+   MqlDateTime a, b;
+   TimeToStruct(t, a);
+   TimeToStruct(TimeTradeServer(), b);
+   string hm = StringFormat("%02d:%02d", a.hour, a.min);
+   if(a.year == b.year && a.day_of_year == b.day_of_year)
+      return hm;
+   return days[a.day_of_week] + " " + hm;
+  }
+
+void CheckNewsAlerts()
+  {
+   int stages = ArraySize(g_alertStages);
+   if(g_newsCount == 0 || stages == 0)
+      return;
+   datetime now = TimeTradeServer();
+   string msg = "";
+   int hits = 0;
+   for(int i = 0; i < g_newsCount; i++)
+     {
+      long secs = (long)g_news[i].time - (long)now;
+      if(secs < -60)
+         continue;
+      bool fire = false;
+      for(int s = 0; s < stages; s++)
+        {
+         uint bit = ((uint)1) << s;
+         if((g_news[i].alerted & bit) != 0)
+            continue;
+         if(secs <= (long)g_alertStages[s] * 60)
+           {
+            g_news[i].alerted |= bit;   // all passed stages fire together as ONE alert
+            fire = true;
+           }
+        }
+      if(fire)
+        {
+         if(msg != "")
+            msg += " | ";
+         msg += (g_news[i].impact == 2 ? "RED " : "ORANGE ") + g_news[i].cur + " " + g_news[i].title +
+                " @ " + NewsWhen(g_news[i].time) + " (" + Countdown(secs) + ")";
+         hits++;
+        }
+     }
+   if(hits == 0)
+      return;
+   Print("[RiskMgr] NEWS: ", msg);
+   if(InpNewsAlertPopup)
+      Alert("[RiskMgr] NEWS: ", msg);
+   if(InpNewsPush)
+      SendNotification(StringSubstr("NEWS: " + msg, 0, 255));
+   Flash("NEWS: " + msg, CLR_NORANGE, 15000);
+  }
+
+// "" if new trades are allowed, otherwise the reason they are blocked
+string NewsBlockReason()
+  {
+   if(!NewsEnabled() || (!InpNewsBlockHigh && !InpNewsBlockMedium))
+      return "";
+   datetime now = TimeTradeServer();
+   for(int i = 0; i < g_newsCount; i++)
+     {
+      int imp = g_news[i].impact;
+      if(!((imp == 2 && InpNewsBlockHigh) || (imp == 1 && InpNewsBlockMedium)))
+         continue;
+      if(now >= g_news[i].time - InpNewsBlockBefore * 60 && now <= g_news[i].time + InpNewsBlockAfter * 60)
+         return "NEWS BLOCK: " + g_news[i].cur + " " + g_news[i].title + " " +
+                Countdown((long)g_news[i].time - (long)now) + " (window -" + IntegerToString(InpNewsBlockBefore) +
+                "/+" + IntegerToString(InpNewsBlockAfter) + "m)";
+     }
+   return "";
+  }
+
+void UpdateNewsPanel()
+  {
+   if(InpNewsSource == NEWS_OFF)
+      return;
+   int rows = MathMax(1, MathMin(8, InpNewsPanelRows));
+   string what = (InpNewsHigh ? "red" : "") + (InpNewsHigh && InpNewsMedium ? "/" : "") + (InpNewsMedium ? "orange" : "");
+   SetText("RM_newshdr", "NEWS  " + WatchedCurrencies() + "  " + what);
+
+   if(MQLInfoInteger(MQL_TESTER))
+      SetText("RM_newsstate", "off in tester");
+   else
+      if(g_newsLoadedAt > 0)
+         SetText("RM_newsstate", g_newsSrc + " " + TimeToString(g_newsLoadedAt, TIME_MINUTES));
+      else
+         SetText("RM_newsstate", "no data");
+
+   datetime now = TimeTradeServer();
+   long keepAfter = MathMax(300, InpNewsBlockAfter * 60);
+   int r = 0;
+   for(int i = 0; i < g_newsCount && r < rows; i++)
+     {
+      long secs = (long)g_news[i].time - (long)now;
+      if(secs < -keepAfter)
+         continue;
+      string idx = IntegerToString(r);
+      color ic = (g_news[i].impact == 2) ? CLR_NRED : CLR_NORANGE;
+      SetText("RM_nb_" + idx, ShortToString(0x25A0));     // filled square = "folder"
+      SetColor("RM_nb_" + idx, ic);
+      string t = g_news[i].title;
+      if(StringLen(t) > 22)
+         t = StringSubstr(t, 0, 21) + ".";
+      SetText("RM_nt_" + idx, NewsWhen(g_news[i].time) + "  " + g_news[i].cur + "  " + t);
+      SetText("RM_nc_" + idx, Countdown(secs));
+      SetColor("RM_nc_" + idx, secs <= 15 * 60 ? ic : CLR_TXT2);
+      r++;
+     }
+   for(; r < rows; r++)
+     {
+      string idx = IntegerToString(r);
+      SetText("RM_nb_" + idx, "");
+      SetText("RM_nt_" + idx, (r == 0 && g_newsLoadedAt > 0) ? "No upcoming " + what + " news this week" : "");
+      SetText("RM_nc_" + idx, "");
+     }
+   string e = g_newsErr;
+   if(StringLen(e) > 56)
+      e = StringSubstr(e, 0, 55) + ".";
+   SetText("RM_newserr", e);
+  }
+
 //+------------------------------------------------------------------+
 //| Validation - returns "" when the order may be sent               |
 //+------------------------------------------------------------------+
@@ -431,6 +1130,9 @@ string Validate()
       return g_lockReason;
    if(GuardOn() && InpBlockIfUnprotected && d_unprotected)
       return "Blocked: " + d_unprotectedInfo + " - set its SL first";
+   string nb = NewsBlockReason();
+   if(nb != "")
+      return nb;
 
    long tm = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
    if(tm == SYMBOL_TRADE_MODE_DISABLED)
@@ -1090,6 +1792,25 @@ void BuildPanel()
    KV("daypl",  cx, cy, iw, "Day P/L");          cy += 18;
    KV("budget", cx, cy, iw, "Loss budget left"); cy += 22;
 
+   if(InpNewsSource != NEWS_OFF)
+     {
+      MkRect("RM_sep4", cx, cy, iw, 1, CLR_BORDER, CLR_BORDER);
+      cy += 8;
+      MkLabel("RM_newshdr", cx, cy, "NEWS", CLR_TXT, 9, ANCHOR_LEFT_UPPER, "Segoe UI Semibold");
+      MkLabel("RM_newsstate", cx + iw, cy + 1, "", CLR_TXT2, 8, ANCHOR_RIGHT_UPPER);
+      cy += 20;
+      int rows = MathMax(1, MathMin(8, InpNewsPanelRows));
+      for(int r = 0; r < rows; r++)
+        {
+         MkLabel("RM_nb_" + IntegerToString(r), cx, cy - 1, "", CLR_TXT2, 9);
+         MkLabel("RM_nt_" + IntegerToString(r), cx + 14, cy, "", CLR_TXT, 8);
+         MkLabel("RM_nc_" + IntegerToString(r), cx + iw, cy, "", CLR_TXT2, 8, ANCHOR_RIGHT_UPPER);
+         cy += 16;
+        }
+      MkLabel("RM_newserr", cx, cy, "", CLR_WARN, 8);
+      cy += 18;
+     }
+
    MkRect("RM_sep3", cx, cy, iw, 1, CLR_BORDER, CLR_BORDER);
    cy += 6;
    MkLabel("RM_status1", cx, cy, "", CLR_TXT, 8);
@@ -1322,6 +2043,8 @@ void UpdatePanel()
    else
       SetText("RM_v_budget", Money(MathMax(0.0, c_budgetLeft)) + "  (open risk " + Money(d_openRisk) + ")");
 
+   UpdateNewsPanel();
+
    //--- status
    string err = Validate();
    string msg;
@@ -1335,7 +2058,7 @@ void UpdatePanel()
       if(err != "")
         {
          msg = err;
-         mc = (g_winLocked && !g_lossLocked) ? CLR_WARN : CLR_ERR;
+         mc = ((g_winLocked && !g_lossLocked) || StringFind(err, "NEWS") == 0) ? CLR_WARN : CLR_ERR;
         }
       else
         {
@@ -1660,6 +2383,11 @@ int OnInit()
    g_firstEval = true;
    RefreshDay();
    BuildPanel();
+   InitAlertStages();
+   if(NewsEnabled())
+      LoadNews();          // uses the shared cache when fresh, so TF changes don't re-download
+   else
+      ObjectsDeleteAll(0, "RM_nv_");
    RefreshAll();
    EventSetMillisecondTimer(250);
    return INIT_SUCCEEDED;
@@ -1691,6 +2419,12 @@ void OnTimer()
       g_lastDayRefresh = now;
       RefreshDay();
       EnforceLocks();
+      if(NewsEnabled())
+        {
+         if(TimeLocal() >= g_newsNextLoad)
+            LoadNews();
+         CheckNewsAlerts();
+        }
      }
    CheckLines();
    RefreshAll();

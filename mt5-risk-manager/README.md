@@ -2,6 +2,7 @@
 
 An on-chart trade panel for MetaTrader 5. You place every trade by hand through this panel, and
 it sizes the lot from your risk, makes you set a stop loss, and applies a daily loss/win guard.
+It also alerts you to **red and orange folder news** from Forex Factory.
 
 ```
 ┌ RISK MANAGER ─────────── EURUSD ┐
@@ -22,6 +23,10 @@ it sizes the lot from your risk, makes you set a stop loss, and applies a daily 
 │ Wins today                0 / 1 │
 │ Day P/L / loss budget left      │
 │─────────────────────────────────│
+│ NEWS  EUR,USD  red/orange  FF 12:05
+│ ■ 14:30  USD  CPI m/m   in 1h 20m│   red / orange squares
+│ ■ Fri 14:30 USD Non-Farm  in 1d 2h│
+│─────────────────────────────────│
 │ status / reason it is blocked   │
 │ [   BUY LIMIT   0.50 lots     ] │
 │ [Reset][Close trades][Del pend] │
@@ -35,6 +40,9 @@ it sizes the lot from your risk, makes you set a stop loss, and applies a daily 
 3. Open it in **MetaEditor** (F4) and press **Compile** (F7). It should compile with 0 errors.
 4. Drag **RiskManagerEA** onto a chart. On the *Common* tab, tick **Allow Algo Trading**.
 5. Make sure the **Algo Trading** button on the toolbar is on (green).
+6. **For Forex Factory news:** go to **Tools → Options → Expert Advisors**, tick
+   **Allow WebRequest for listed URL**, and add `https://nfs.faireconomy.media`.
+   If you skip this step, the EA tells you and uses MT5's built-in calendar instead.
 
 > **Test it on a demo account first.** In the Strategy Tester, chart buttons don't respond to
 > clicks, so you can only check the panel properly on a live demo chart.
@@ -106,6 +114,33 @@ Limitation: today's limits and the override flag are saved in MT5 *global variab
 who deletes those by hand could reset them. That is a deliberate obstacle, not a hard security
 barrier. Stronger protection is on the list for later.
 
+## News alerts (red / orange folder)
+
+- **Source:** Forex Factory's weekly calendar feed
+  (`nfs.faireconomy.media/ff_calendar_thisweek.json`). FF's **High** impact is the red folder and
+  **Medium** is the orange folder. If FF can't be reached, the EA falls back to MT5's built-in
+  economic calendar, which has the same high/moderate levels. You can also choose FF only, MT5
+  only, or off.
+- **Which currencies:** by default, the chart symbol's own currencies (EURUSD → EUR and USD,
+  XAUUSD → USD). You can set your own list (`USD,EUR,GBP`) or `ALL`. FF's "All" events (G7, G20
+  and so on) always count.
+- **Alerts:** a pop-up with sound and/or a phone push, at each "minutes before" value you set
+  (default `30,5`; add `0` for an alert at the release time). Events released at the same time
+  come as one combined alert, and nothing alerts twice.
+- **On the panel:** the next few events, each with a red/orange square, the time (server time),
+  the currency, the title and a countdown. The source and last update time are shown at the top
+  right.
+- **On the chart:** a dotted vertical line at each event. Hover over it to see the title,
+  forecast and previous figure.
+- **Optional news block (off by default):** blocks *new* trades from N minutes before to N
+  minutes after red and/or orange news. Trades already open are not touched.
+- **Doesn't hammer Forex Factory:** the feed is downloaded at most once every 60 minutes
+  (minimum 15) and saved to `Common/Files/RiskManager/`. Every chart and every MT5 terminal on
+  the PC uses that one saved copy. If a download fails, the last saved copy is used.
+- **Times:** FF times are converted to your broker's server time automatically, so they line up
+  with the chart.
+- News is turned off in the Strategy Tester, because MT5 doesn't allow web requests there.
+
 ## Inputs (summary)
 
 | Group | Inputs |
@@ -113,6 +148,7 @@ barrier. Stronger protection is on the list for later.
 | Risk per trade | risk mode, default risk, hard cap %, commission/lot, max lots |
 | Default levels | default SL points, pending offset points, default R:R |
 | Daily guard | enable, max losses, max loss %, max wins, reset hour, breakeven tolerance, cap to budget, block if a trade has no SL, enforcer, delete pendings on lock, push |
+| News alerts | source, FF URL, red / orange, currencies, alert minutes, pop-up, push, block red / orange + window, refresh, chart lines, panel rows |
 | Execution | magic, slippage, pending expiry (GTC / end of day), confirm orders, comment |
 | Panel | position, line and zone colours |
 
