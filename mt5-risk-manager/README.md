@@ -132,8 +132,10 @@ barrier. Stronger protection is on the list for later.
   right.
 - **On the chart:** a dotted vertical line at each event. Hover over it to see the title,
   forecast and previous figure.
-- **Optional news block (off by default):** blocks *new* trades from N minutes before to N
-  minutes after red and/or orange news. Trades already open are not touched.
+- **News block:** by default, *new* trades are blocked from **15 minutes before to 15 minutes
+  after red folder news**. While the block is on, the panel shows which event is causing it and
+  the button greys out. Orange folder blocking is available but off by default. Both windows can
+  be changed in the inputs. Trades already open are not touched.
 - **Doesn't hammer Forex Factory:** the feed is downloaded at most once every 60 minutes
   (minimum 15) and saved to `Common/Files/RiskManager/`. Every chart and every MT5 terminal on
   the PC uses that one saved copy. If a download fails, the last saved copy is used.

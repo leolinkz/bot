@@ -84,7 +84,7 @@ input string            InpNewsCurrencies   = "";     // Currencies, e.g. "USD,E
 input string            InpNewsAlertMinutes = "30,5"; // Alert this many minutes before (comma list, 0 = at release)
 input bool              InpNewsAlertPopup   = true;   // Pop-up + sound alert
 input bool              InpNewsPush         = false;  // Push notification to phone
-input bool              InpNewsBlockHigh    = false;  // Block NEW trades around red news
+input bool              InpNewsBlockHigh    = true;   // Block NEW trades around red news
 input bool              InpNewsBlockMedium  = false;  // Block NEW trades around orange news
 input int               InpNewsBlockBefore  = 15;     // Block window: minutes before
 input int               InpNewsBlockAfter   = 15;     // Block window: minutes after
